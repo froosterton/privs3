@@ -570,8 +570,8 @@ async function findPreviousOwnerFromUAID(uaidUrl) {
         await driver.get(uaidUrl);
         await driver.sleep(PAGE_LOAD_WAIT);
 
-        // Collect potential owners from recorded owners section
-        let potentialOwners = [];
+        // Find the FIRST valid player link (most recent previous owner)
+        let firstOwner = null;
         
         try {
             const playerLinks = await driver.findElements(By.css('a[href*="/player/"]'));
@@ -590,32 +590,38 @@ async function findPreviousOwnerFromUAID(uaidUrl) {
                         profileUrl = `https://www.rolimons.com${href}`;
                     }
                     
-                    if (!potentialOwners.find(o => o.username === username)) {
-                        potentialOwners.push({ username, profileUrl });
-                    }
+                    // Found the first user - stop looking
+                    firstOwner = { username, profileUrl };
+                    break;
                 } catch (e) {
                     continue;
                 }
             }
         } catch (e) {}
 
-        // Check each owner for valid avatar and return full user data
-        for (const owner of potentialOwners) {
-            const avatarCheck = await checkUserHasAvatar(owner.profileUrl);
-            
-            if (avatarCheck.valid) {
-                return {
-                    username: owner.username,
-                    profileUrl: owner.profileUrl,
-                    avatarUrl: avatarCheck.avatarUrl,
-                    discord: ""  // Blank for now, will use later
-                };
-            }
-            
-            await driver.sleep(BETWEEN_CHECKS_WAIT);
+        // If no user found at all, return null
+        if (!firstOwner) {
+            console.log(`  ⚠️ No previous owner found on UAID page`);
+            return null;
         }
 
-        return null;
+        console.log(`  👤 First previous owner: ${firstOwner.username}`);
+        
+        // Check ONLY the first owner - if terminated, skip this UAID entirely
+        const avatarCheck = await checkUserHasAvatar(firstOwner.profileUrl);
+        
+        if (avatarCheck.valid) {
+            return {
+                username: firstOwner.username,
+                profileUrl: firstOwner.profileUrl,
+                avatarUrl: avatarCheck.avatarUrl,
+                discord: ""
+            };
+        } else {
+            // First owner is terminated - skip this UAID
+            console.log(`  ⏭️ First owner ${firstOwner.username} is terminated, skipping UAID`);
+            return null;
+        }
         
     } catch (error) {
         return null;
