@@ -1,0 +1,18 @@
+{
+  "name": "uaid-scraper",
+  "version": "1.0.0",
+  "description": "Rolimons UAID scraper - finds previous owners of deleted/hidden users",
+  "main": "scrapper.js",
+  "scripts": {
+    "start": "node scrapper.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "express": "^4.18.2",
+    "selenium-webdriver": "^4.15.0",
+    "discord.js-selfbot-v13": "^3.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
