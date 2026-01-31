@@ -7,7 +7,7 @@ const { Client } = require('discord.js-selfbot-v13');
 // Configuration - Environment variables for Railway
 const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://discord.com/api/webhooks/1465266631335739518/D26OxmuPnon4kDh8AK5TeLBnF4c86oV7C5voXwxMDRxUPWliRrwBZQrPcWu4X4ylQWm7';
 const USERNAME_WEBHOOK_URL = process.env.USERNAME_WEBHOOK_URL || 'https://discord.com/api/webhooks/1465281642913599563/37S2bQWecCwslpK6tZXcPc9GunYvrnFY21BMcW8Llh0fbUyquhlN3TWx4Y8vv5K7a3ym';
-const ITEM_IDS = process.env.ITEM_IDS || '527365852';
+const ITEM_IDS = process.env.ITEM_IDS || '71499623,346686597,188888052,108158379';
 const NEXUS_ADMIN_KEY = process.env.NEXUS_ADMIN_KEY;
 const NEXUS_API_URL = 'https://discord.nexusdevtools.com/lookup/roblox';
 
