@@ -5,11 +5,11 @@ const express = require('express');
 const { Client } = require('discord.js-selfbot-v13');
 
 // Configuration - Environment variables for Railway
-const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://discord.com/api/webhooks/1424544927215259774/CIwNwKw8SSM2LIxubgMoZjGioui_3Qmoz6h9VGSTqvZL_1eRcQ-hFmaQc_KuvabCToIo';
+const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://discord.com/api/webhooks/1486117350087462941/xhNveUHasBmQRIavL4kwaYWGdKYCoTI2thJnMIzvdZ3ranR_kbyFTF8klJiqXTlWhE_H';
 const USERNAME_WEBHOOK_URL = process.env.USERNAME_WEBHOOK_URL || 'https://discord.com/api/webhooks/1424544927215259774/CIwNwKw8SSM2LIxubgMoZjGioui_3Qmoz6h9VGSTqvZL_1eRcQ-hFmaQc_KuvabCToIo';
-const ITEM_IDS = process.env.ITEM_IDS || '416832622,315549204,169444515,507795810,193696364';
+const ITEM_IDS = process.env.ITEM_IDS || '23301681';
 const NEXUS_ADMIN_KEY = process.env.NEXUS_ADMIN_KEY;
-const NEXUS_API_URL = 'https://discord.nexusdevtools.com/lookup/roblox';
+const NEXUS_API_URL = 'https://discord.latticesite.com/lookup/roblox';
 
 // Discord bot configuration
 const USER_TOKEN = process.env.USER_TOKEN;
