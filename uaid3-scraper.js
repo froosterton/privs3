@@ -205,6 +205,146 @@ async function sendUsernameOnlyToWebhook(discordUsername) {
     }
 }
 
+// Fetch channel history via Discord REST (user token — same as selfbot)
+async function fetchAllMessages(channelId, startMessageId = null, endMessageId = null) {
+    const usernames = [];
+    let lastMessageId = startMessageId || null;
+    let foundStartMessage = !startMessageId;
+    let foundEndMessage = false;
+    const botToken = USER_TOKEN;
+
+    if (!botToken) {
+        console.error('❌ USER_TOKEN not set, cannot fetch messages from Discord API');
+        return [];
+    }
+
+    console.log('📥 Fetching messages from Discord API...');
+
+    while (true) {
+        try {
+            const url = `https://discord.com/api/v10/channels/${channelId}/messages`;
+            const params = { limit: 100 };
+            if (lastMessageId) params.before = lastMessageId;
+
+            const response = await axios.get(url, {
+                headers: {
+                    Authorization: botToken,
+                    'Content-Type': 'application/json'
+                },
+                params
+            });
+
+            const messages = response.data;
+            if (!messages || messages.length === 0) break;
+
+            for (const msg of messages) {
+                if (endMessageId && msg.id === endMessageId) {
+                    foundEndMessage = true;
+                    break;
+                }
+
+                if (startMessageId && !foundStartMessage) {
+                    if (msg.id === startMessageId) foundStartMessage = true;
+                    else continue;
+                }
+
+                if (foundStartMessage && !foundEndMessage) {
+                    if (msg.webhook_id) {
+                        if (msg.embeds && msg.embeds.length > 0) {
+                            for (const embed of msg.embeds) {
+                                if (embed.fields) {
+                                    for (const field of embed.fields) {
+                                        if (field.name === 'Discord Username' && field.value) {
+                                            const username = field.value.trim();
+                                            if (username && !usernames.includes(username)) usernames.push(username);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (msg.content && msg.content.trim()) {
+                            const content = msg.content.trim();
+                            if (!content.includes(' ') && content.length > 0 && !usernames.includes(content)) {
+                                usernames.push(content);
+                            }
+                        }
+                    }
+                }
+                lastMessageId = msg.id;
+            }
+
+            if (foundEndMessage) break;
+            if (messages.length < 100) break;
+            await new Promise(resolve => setTimeout(resolve, 500));
+        } catch (error) {
+            console.error('❌ Error fetching messages:', error.message);
+            if (error.response) {
+                console.error('Response status:', error.response.status);
+                console.error('Response data:', error.response.data);
+            }
+            break;
+        }
+    }
+
+    return usernames.reverse();
+}
+
+async function findMessageIdByUsername(channelId, username) {
+    const botToken = USER_TOKEN;
+    if (!botToken) {
+        console.error('❌ USER_TOKEN not set, cannot search for messages');
+        return null;
+    }
+
+    let lastMessageId = null;
+    console.log(`🔍 Searching for message with username: ${username}`);
+
+    while (true) {
+        try {
+            const url = `https://discord.com/api/v10/channels/${channelId}/messages`;
+            const params = { limit: 100 };
+            if (lastMessageId) params.before = lastMessageId;
+
+            const response = await axios.get(url, {
+                headers: {
+                    Authorization: botToken,
+                    'Content-Type': 'application/json'
+                },
+                params
+            });
+
+            const messages = response.data;
+            if (!messages || messages.length === 0) break;
+
+            for (const msg of messages) {
+                if (msg.webhook_id) {
+                    if (msg.embeds && msg.embeds.length > 0) {
+                        for (const embed of msg.embeds) {
+                            if (embed.fields) {
+                                for (const field of embed.fields) {
+                                    if (field.name === 'Discord Username' && field.value && field.value.trim() === username) {
+                                        return msg.id;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (msg.content && msg.content.trim() === username) return msg.id;
+                }
+                lastMessageId = msg.id;
+            }
+
+            if (messages.length < 100) break;
+            await new Promise(resolve => setTimeout(resolve, 500));
+        } catch (error) {
+            console.error('❌ Error searching for message:', error.message);
+            break;
+        }
+    }
+
+    return null;
+}
+
 // Express server for Railway health check
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -221,6 +361,14 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`🌐 Health check server running on port ${PORT}`);
+    console.log('ℹ️  This process stays alive for Railway health checks.');
+    if (!USER_TOKEN) {
+        console.log('⚠️  USER_TOKEN not set — Discord commands (!total, !makefile, …) will not work.');
+    }
+    if (!NEXUS_ADMIN_KEY) {
+        console.log('⚠️  NEXUS_ADMIN_KEY not set — lookupDiscordAndSend will fail until you set it.');
+    }
+    console.log('ℹ️  There is no UAID/Selenium scraper entry in this file: nothing polls Rolimons until you add/run that loop (e.g. from scrapper.js or restore main()).');
 });
 
 // Initialize Discord client for commands
@@ -381,6 +529,10 @@ if (USER_TOKEN) {
     });
 
     discordClient.on('error', (e) => console.error('❌ Discord client error:', e));
+
+    discordClient.login(USER_TOKEN).catch((e) => {
+        console.error('❌ Failed to login to Discord (check USER_TOKEN):', e.message || e);
+    });
 } else {
     console.log('⚠️ USER_TOKEN not set — Discord command features disabled');
 }
