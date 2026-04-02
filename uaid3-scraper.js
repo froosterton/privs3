@@ -181,9 +181,12 @@ if (USER_TOKEN) {
             }
             scrapeStartPageOverride = n;
             console.log(`📄 Page override set to ${n}`);
-            await message.reply(
-                `✅ **Page ${n}** — if a scrape is running, the browser will **jump there** (re-anchor from last page). New items still respect this until you \`!page clear\`.`
-            );
+            // Do not await — selfbot replies can stall the handler; override is already applied
+            void message
+                .reply(
+                    `✅ **Page ${n}** — if a scrape is running, the browser will **jump there** (re-anchor from last page). New items still respect this until you \`!page clear\`.`
+                )
+                .catch((e) => console.error('Discord reply (!page):', e.message));
             return;
         }
 
@@ -565,21 +568,50 @@ function normalizeDedupKey(name) {
         .toLowerCase();
 }
 
+/** Strip common Discord markdown/noise from API embed field values */
+function normalizeDedupFieldValue(val) {
+    return String(val || '')
+        .replace(/\*\*/g, '')
+        .replace(/`/g, '')
+        .replace(/\\/g, '')
+        .trim();
+}
+
+/** Only add to Roblox dedup set if value looks like a real username (avoids bad embed garbage) */
+function looksLikeRobloxUsernameForDedup(s) {
+    const t = normalizeDedupFieldValue(s);
+    return /^[a-zA-Z0-9_]{3,20}$/.test(t);
+}
+
+/** Lenient Discord tag / display — reject obvious URLs */
+function looksLikeDiscordTagForDedup(s) {
+    const t = normalizeDedupFieldValue(s);
+    if (t.length < 2 || t.length > 80) return false;
+    if (/https?:\/\//i.test(t) || /^<[@#]/.test(t)) return false;
+    return true;
+}
+
 /** Rolimons blank-page throttle message */
 const ROLIMONS_UAID_RATE_LIMIT_PATTERN = /loading\s+uaid\s+pages\s+too\s+quickly/i;
 
 let lastRolimonsRateLimitWebhookAt = 0;
 const ROLIMONS_RATE_LIMIT_WEBHOOK_COOLDOWN_MS = 120000;
 
+/**
+ * Cheap throttle check — avoid getPageSource() here: it runs after every Prev and can hang for seconds
+ * on large Rolimons pages (feels "frozen" when ROLIMONS_PREV_DELAY_MS is low).
+ */
 async function pageIndicatesRolimonsUaidThrottle(webDriver) {
     try {
-        const src = await webDriver.getPageSource();
-        if (ROLIMONS_UAID_RATE_LIMIT_PATTERN.test(src)) return true;
-    } catch (_) {}
-    try {
-        const body = await webDriver.findElement(By.tagName('body'));
-        const text = await body.getText();
-        if (ROLIMONS_UAID_RATE_LIMIT_PATTERN.test(text)) return true;
+        const snippet = await webDriver.executeScript(`
+            try {
+                var b = document.body;
+                if (!b) return '';
+                var t = b.innerText || '';
+                return t.slice(0, 20000);
+            } catch (e) { return ''; }
+        `);
+        if (typeof snippet === 'string' && ROLIMONS_UAID_RATE_LIMIT_PATTERN.test(snippet)) return true;
     } catch (_) {}
     return false;
 }
@@ -658,11 +690,11 @@ async function loadDedupHistoryFromLogChannel() {
                     if (!embed.fields) continue;
                     for (const field of embed.fields) {
                         const fname = (field.name || '').trim().toLowerCase();
-                        const val = (field.value || '').trim();
+                        const val = normalizeDedupFieldValue(field.value || '');
                         if (!val) continue;
-                        if (fname === 'discord username') {
+                        if (fname === 'discord username' && looksLikeDiscordTagForDedup(val)) {
                             historicalDiscordFromEmbeds.add(normalizeDedupKey(val));
-                        } else if (fname === 'roblox username') {
+                        } else if (fname === 'roblox username' && looksLikeRobloxUsernameForDedup(val)) {
                             historicalRobloxFromEmbeds.add(normalizeDedupKey(val));
                         }
                     }
@@ -930,6 +962,7 @@ async function scrapeRolimonsItem(itemId) {
         
         // Navigate to the first page to get item name and find pagination
         await driver.get(url);
+        console.log('⏳ Item page loaded — waiting 5s for scripts/ads to settle (not frozen)...');
         await driver.sleep(5000);
         await checkRolimonsUaidRateLimit(driver, `item ${itemId} initial load`);
 
@@ -939,7 +972,7 @@ async function scrapeRolimonsItem(itemId) {
         
         // Click "All Copies" tab to get all users instead of just premium copies
         try {
-            console.log('📋 Locating "All Copies" tab...');
+            console.log('📋 Locating "All Copies" tab (this can take up to ~45s if the page is slow)...');
             let allCopiesTab = await findAllCopiesTabElement(driver);
             if (!allCopiesTab) {
                 console.log('⚠️ All Copies tab not found — refreshing item page once...');
@@ -1133,21 +1166,31 @@ async function scrapeRolimonsItem(itemId) {
         let page = startPage;
         /** After first table read we go backward with one Prev per iteration; skipped right after a live !page jump. */
         let needPrevClick = false;
+        /**
+         * Last !page value we already anchored the browser to. Re-jump only when Discord sends a *new* number
+         * (otherwise page counts down 180→179→… but override stays 180 and would wrongly re-trigger full jump).
+         */
+        let lastAcknowledgedPageOverride = null;
 
         while (page >= 1) {
             await waitWhilePaused();
 
             let didLiveJump = false;
             if (scrapeStartPageOverride != null) {
-                const desired = Math.max(1, Math.min(scrapeStartPageOverride, totalPages));
-                if (desired !== page) {
-                    console.log(`📄 Live !page sync: browser was tracking page ${page}, jumping to ${desired}...`);
-                    const jumped = await jumpToAllCopiesPageFromOverride(desired, itemId);
-                    totalPages = jumped.totalPages;
-                    page = jumped.page;
-                    needPrevClick = false;
-                    didLiveJump = true;
+                if (lastAcknowledgedPageOverride !== scrapeStartPageOverride) {
+                    const desired = Math.max(1, Math.min(scrapeStartPageOverride, totalPages));
+                    lastAcknowledgedPageOverride = scrapeStartPageOverride;
+                    if (desired !== page) {
+                        console.log(`📄 Live !page sync: new target ${desired} (was tracking page ${page}) — re-anchoring...`);
+                        const jumped = await jumpToAllCopiesPageFromOverride(desired, itemId);
+                        totalPages = jumped.totalPages;
+                        page = jumped.page;
+                        needPrevClick = false;
+                        didLiveJump = true;
+                    }
                 }
+            } else {
+                lastAcknowledgedPageOverride = null;
             }
 
             await checkRolimonsUaidRateLimit(driver, `item ${itemId} page ${page}/${totalPages}`);
@@ -1198,11 +1241,13 @@ async function scrapeRolimonsItem(itemId) {
             // before processing all rows. This helps catch if we're reading stale/cached data.
             try {
                 const sampleRows = await driver.findElements(By.css('#all_copies_table tbody tr'));
-                if (sampleRows.length > 0) {
-                    const firstRow = sampleRows[0];
-                    const sampleLink = await firstRow.findElement(By.css('a[href*="/player/"]'));
-                    const sampleUsername = await sampleLink.getText();
-                    console.log(`🔍 Sample user on this page (first row): "${sampleUsername}"`);
+                for (let si = 0; si < Math.min(sampleRows.length, 8); si++) {
+                    const sampleLinks = await sampleRows[si].findElements(By.css('a[href*="/player/"]'));
+                    if (sampleLinks.length > 0) {
+                        const sampleUsername = await sampleLinks[0].getText();
+                        console.log(`🔍 Sample user on this page (row ${si + 1}): "${sampleUsername}"`);
+                        break;
+                    }
                 }
             } catch (e) {
                 console.log('⚠️ Could not read sample user from table:', e.message);
@@ -1227,9 +1272,10 @@ async function scrapeRolimonsItem(itemId) {
                 if (page >= 1) needPrevClick = true;
                 continue;
             }
-            console.log(`👥 Found ${rows.length} users on page ${page}`);
-            console.log(`🔄 Processing users from bottom to top (reverse order)...`);
+            console.log(`👥 Found ${rows.length} table rows on page ${page} (some may be Deleted/Hidden)`);
+            console.log(`🔄 Processing rows with profile links bottom to top...`);
 
+            const rowLoopOverrideSnapshot = scrapeStartPageOverride;
             let rowLoopExitReason = 'complete';
             for (let i = rows.length - 1; i >= 0; i--) {
                 try {
@@ -1242,8 +1288,12 @@ async function scrapeRolimonsItem(itemId) {
                     }
                     const row = currentRows[i];
 
-                    // Always use the Rolimons profile link (e.g. <a href="/player/1">Roblox</a>)
-                    const link = await row.findElement(By.css('a[href*="/player/"]'));
+                    const playerLinks = await row.findElements(By.css('a[href*="/player/"]'));
+                    if (playerLinks.length === 0) {
+                        console.log(`⏭️ Row ${i} (from bottom): no /player/ link — skipping (Deleted/Hidden or empty)`);
+                        continue;
+                    }
+                    const link = playerLinks[0];
 
                     // Try multiple ways to get the visible username text
                     let username = (await link.getText()) || '';
@@ -1318,15 +1368,15 @@ async function scrapeRolimonsItem(itemId) {
                         totalLogged++;
                     }
 
-                    if (scrapeStartPageOverride != null) {
-                        const desired = Math.max(1, Math.min(scrapeStartPageOverride, totalPages));
-                        if (desired !== page) {
-                            console.log(
-                                `📄 !page override changed (target ${desired} ≠ current ${page}) — stopping row loop to re-sync`
-                            );
-                            rowLoopExitReason = 'override';
-                            break;
-                        }
+                    if (
+                        scrapeStartPageOverride != null &&
+                        scrapeStartPageOverride !== rowLoopOverrideSnapshot
+                    ) {
+                        console.log(
+                            `📄 !page changed mid-run (${rowLoopOverrideSnapshot} → ${scrapeStartPageOverride}) — re-sync next`
+                        );
+                        rowLoopExitReason = 'override';
+                        break;
                     }
 
                 } catch (error) {
