@@ -17,6 +17,15 @@ const NEXUS_API_URL = process.env.NEXUS_API_URL || 'https://discord.latticesite.
  */
 const CHROME_PROXY = (process.env.CHROME_PROXY || '').trim();
 
+/**
+ * Wait after each All Copies "Prev" while paginating (ms). Default 5000 keeps DataTables stable and reduces
+ * Rolimons UAID rate limits; lower (e.g. 2000) speeds long jumps but can cause stale rows or throttles.
+ */
+const ROLIMONS_PREV_DELAY_MS = Math.max(
+    300,
+    Number.parseInt(String(process.env.ROLIMONS_PREV_DELAY_MS || '5000'), 10) || 5000
+);
+
 /** `HEADLESS=0` or `CHROME_HEADLESS=0` opens real Chrome windows (local Cloudflare checks). Default: headless. */
 function useHeadlessChrome() {
     const v = String(process.env.HEADLESS ?? process.env.CHROME_HEADLESS ?? '1')
@@ -704,7 +713,7 @@ async function navigateFromLastPageToTargetPage(targetPage, totalPages) {
             } catch (e) {
                 await driver.executeScript('arguments[0].click();', prevLink);
             }
-            await driver.sleep(5000);
+            await driver.sleep(ROLIMONS_PREV_DELAY_MS);
             await checkRolimonsUaidRateLimit(driver, `page jump toward ${page} (${s + 1}/${stepsDown})`);
         } catch (e) {
             console.log(`❌ Could not click Prev during page jump: ${e.message}`);
@@ -1163,7 +1172,7 @@ async function scrapeRolimonsItem(itemId) {
                         await driver.executeScript('arguments[0].click();', prevLink);
                         console.log('✅ Prev JS click succeeded');
                     }
-                    await driver.sleep(5000);
+                    await driver.sleep(ROLIMONS_PREV_DELAY_MS);
                     await checkRolimonsUaidRateLimit(driver, `item ${itemId} after Prev to page ${page}`);
                 } catch (e) {
                     console.log(`❌ Could not click Prev for page ${page}: ${e.message}`);
@@ -1766,6 +1775,7 @@ console.log(`   - Webhook URL: ${WEBHOOK_URL.substring(0, 50)}...`);
 console.log(`   - Item IDs: ${ITEM_IDS}`);
 console.log(`   - CHROME_PROXY: ${CHROME_PROXY ? 'set' : '(not set — datacenter IP may hit Cloudflare)'}`);
 console.log(`   - HEADLESS: ${useHeadlessChrome() ? '1 (headless)' : '0 (visible browser — use locally for CF)'}`);
+console.log(`   - ROLIMONS_PREV_DELAY_MS: ${ROLIMONS_PREV_DELAY_MS} (wait after each Prev)`);
 if (USER_TOKEN) {
     console.log(
         `   - Discord !commands: enabled (channels: ${[...COMMAND_CHANNEL_IDS_SET].join(', ')})`
