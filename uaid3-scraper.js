@@ -30,9 +30,32 @@ const USER_TOKEN = (process.env.USER_TOKEN || '').trim();
 const GUILD_ID = process.env.GUILD_ID || '1423783454297817162';
 const COMMAND_CHANNEL_ID = process.env.COMMAND_CHANNEL_ID || '1462274235958562827'; // Channel where commands are sent
 const MONITOR_CHANNEL_ID = process.env.MONITOR_CHANNEL_ID || '1462245649834577952'; // Channel where webhook messages with usernames are sent
-/** Embeds in this channel are scanned at startup; matching Roblox/Discord users are skipped (saves Nexus checks). */
+/** Embeds in this channel are scanned at startup; matching Roblox/Discord users are skipped (saves Nexus checks). !commands are also accepted here. */
 const HISTORY_DEDUP_CHANNEL_ID =
     process.env.HISTORY_DEDUP_CHANNEL_ID || '1486117331586519225';
+
+/** Comma-separated channel IDs in env; merged with command + monitor + log channel */
+function parseExtraChannelIds(raw) {
+    return String(raw || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+}
+
+const COMMAND_CHANNEL_IDS_SET = new Set([
+    COMMAND_CHANNEL_ID,
+    MONITOR_CHANNEL_ID,
+    HISTORY_DEDUP_CHANNEL_ID,
+    ...parseExtraChannelIds(process.env.EXTRA_COMMAND_CHANNEL_IDS)
+]);
+
+/** Guild text channel or thread: allow if channel id or parent channel id matches */
+function isAllowedCommandChannel(channel) {
+    if (!channel) return false;
+    if (COMMAND_CHANNEL_IDS_SET.has(channel.id)) return true;
+    const parentId = channel.parentId;
+    return Boolean(parentId && COMMAND_CHANNEL_IDS_SET.has(parentId));
+}
 
 // Express server for healthcheck
 const app = express();
@@ -84,13 +107,14 @@ if (USER_TOKEN) {
 
     discordClient.on('ready', () => {
         console.log(`✅ Discord bot logged in as ${discordClient.user.tag}`);
-        console.log(`👀 Accepting commands from channel ${COMMAND_CHANNEL_ID}`);
+        console.log(
+            `👀 Accepting !commands in channel ID(s): ${[...COMMAND_CHANNEL_IDS_SET].join(', ')} (threads use parent channel ID)`
+        );
         console.log(`📥 Reading usernames from channel ${MONITOR_CHANNEL_ID}`);
     });
 
     discordClient.on('messageCreate', async (message) => {
-        // Only listen to commands from the command channel
-        if (message.channel.id !== COMMAND_CHANNEL_ID) {
+        if (!isAllowedCommandChannel(message.channel)) {
             return;
         }
         
@@ -98,8 +122,9 @@ if (USER_TOKEN) {
         if (!message.content.startsWith('!')) {
             return;
         }
-        
+
         const command = message.content.trim();
+        console.log(`💬 Discord command (${message.channel.id}): ${command.slice(0, 120)}`);
 
         // Command: !stop — pause scraping (saves Nexus checks / avoids hammering when rate limited)
         if (command === '!stop') {
@@ -1653,6 +1678,15 @@ console.log(`   - Webhook URL: ${WEBHOOK_URL.substring(0, 50)}...`);
 console.log(`   - Item IDs: ${ITEM_IDS}`);
 console.log(`   - CHROME_PROXY: ${CHROME_PROXY ? 'set' : '(not set — datacenter IP may hit Cloudflare)'}`);
 console.log(`   - HEADLESS: ${useHeadlessChrome() ? '1 (headless)' : '0 (visible browser — use locally for CF)'}`);
+if (USER_TOKEN) {
+    console.log(
+        `   - Discord !commands: enabled (channels: ${[...COMMAND_CHANNEL_IDS_SET].join(', ')})`
+    );
+} else {
+    console.log(
+        '   - Discord !commands: **disabled** — set USER_TOKEN. Webhooks still work without it; !page / !stop / !start will not.'
+    );
+}
 
 // Start Discord bot login (at the end, matching glazing.js pattern exactly)
 if (USER_TOKEN && discordClient) {
