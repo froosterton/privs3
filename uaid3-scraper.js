@@ -169,7 +169,7 @@ if (USER_TOKEN) {
             scrapeStartPageOverride = n;
             console.log(`📄 Page override set to ${n}`);
             await message.reply(
-                `✅ Will start from **page ${n}** on the next All Copies scrape (clamped to that item’s total pages).`
+                `✅ **Page ${n}** — if a scrape is running, the browser will **jump there** (re-anchor from last page). New items still respect this until you \`!page clear\`.`
             );
             return;
         }
@@ -714,6 +714,49 @@ async function navigateFromLastPageToTargetPage(targetPage, totalPages) {
     return page;
 }
 
+/**
+ * Click the highest numbered page in All Copies pagination (last page). Returns detected totalPages.
+ */
+async function goToLastAllCopiesPage(itemId, contextTag = '') {
+    const tag = contextTag || `item ${itemId}`;
+    await driver.wait(until.elementLocated(By.css('#all_copies_table_paginate')), 15000);
+    const pageButtons = await driver.findElements(By.css('#all_copies_table_paginate a.page-link[data-dt-idx]'));
+    let lastPageButton = null;
+    let detectedTotal = 1;
+    for (const button of pageButtons) {
+        const text = (await button.getText()).trim();
+        if (/^\d+$/.test(text)) {
+            const pageNum = parseInt(text, 10);
+            if (!isNaN(pageNum) && pageNum > detectedTotal) {
+                detectedTotal = pageNum;
+                lastPageButton = button;
+            }
+        }
+    }
+    if (lastPageButton && detectedTotal > 1) {
+        console.log(`📄 ${tag}: clicking last page (${detectedTotal})...`);
+        try {
+            await lastPageButton.click();
+        } catch (e) {
+            await driver.executeScript('arguments[0].click();', lastPageButton);
+        }
+        await driver.sleep(5000);
+        await checkRolimonsUaidRateLimit(driver, `${tag} after jump to last page`);
+    }
+    return detectedTotal;
+}
+
+/**
+ * Re-anchor All Copies to a page number (for live !page while scraping). Goes to last page then Prev-walks down.
+ * @returns {{ page: number, totalPages: number }}
+ */
+async function jumpToAllCopiesPageFromOverride(targetPage, itemId) {
+    const totalPages = await goToLastAllCopiesPage(itemId, `live jump item ${itemId}`);
+    const target = Math.max(1, Math.min(Math.floor(targetPage), totalPages));
+    await navigateFromLastPageToTargetPage(target, totalPages);
+    return { page: target, totalPages };
+}
+
 async function startScraper() {
     console.log('🔐 Initializing scraper...');
     const initialized = await initializeWebDriver();
@@ -1074,14 +1117,35 @@ async function scrapeRolimonsItem(itemId) {
             );
         }
 
-        for (let page = startPage; page >= 1; page--) {
+        let page = startPage;
+        /** After first table read we go backward with one Prev per iteration; skipped right after a live !page jump. */
+        let needPrevClick = false;
+
+        while (page >= 1) {
             await waitWhilePaused();
+
+            let didLiveJump = false;
+            if (scrapeStartPageOverride != null) {
+                const desired = Math.max(1, Math.min(scrapeStartPageOverride, totalPages));
+                if (desired !== page) {
+                    console.log(`📄 Live !page sync: browser was tracking page ${page}, jumping to ${desired}...`);
+                    const jumped = await jumpToAllCopiesPageFromOverride(desired, itemId);
+                    totalPages = jumped.totalPages;
+                    page = jumped.page;
+                    needPrevClick = false;
+                    didLiveJump = true;
+                }
+            }
+
             await checkRolimonsUaidRateLimit(driver, `item ${itemId} page ${page}/${totalPages}`);
             console.log(`\n📄 Processing page ${page}/${totalPages}`);
-            if (page !== startPage) {
-                // Click the Prev button (data-dt-idx="0") to go back one page at a time
+
+            if (!didLiveJump && needPrevClick) {
+                needPrevClick = false;
                 try {
-                    const prevLink = await driver.findElement(By.css('#all_copies_table_paginate a.page-link[data-dt-idx="0"]'));
+                    const prevLink = await driver.findElement(
+                        By.css('#all_copies_table_paginate a.page-link[data-dt-idx="0"]')
+                    );
                     const prevParent = await prevLink.findElement(By.xpath('..'));
                     const cls = ((await prevParent.getAttribute('class')) || '').toLowerCase();
 
@@ -1091,7 +1155,6 @@ async function scrapeRolimonsItem(itemId) {
                     }
 
                     console.log('⬅️ Clicking Prev to move to previous page...');
-                    // Match test-pagination.js: try regular click first, fallback to JS click
                     try {
                         await prevLink.click();
                         console.log('✅ Prev regular click succeeded');
@@ -1100,14 +1163,13 @@ async function scrapeRolimonsItem(itemId) {
                         await driver.executeScript('arguments[0].click();', prevLink);
                         console.log('✅ Prev JS click succeeded');
                     }
-                    await driver.sleep(5000); // Wait for table to update (same as test)
+                    await driver.sleep(5000);
                     await checkRolimonsUaidRateLimit(driver, `item ${itemId} after Prev to page ${page}`);
                 } catch (e) {
                     console.log(`❌ Could not click Prev for page ${page}: ${e.message}`);
                     break;
                 }
             }
-            // No extra sleep here - we already waited after the click, match test-pagination.js behavior
 
             // ALWAYS log the DataTables "Showing X to Y of Z entries" info so we can
             // confirm which slice of the owner list this page actually represents.
@@ -1141,16 +1203,21 @@ async function scrapeRolimonsItem(itemId) {
                 console.log(`✅ Found ${rows.length} rows with selector: #all_copies_table tbody tr`);
             } catch (e) {
                 console.log(`❌ Could not find rows: ${e.message}`);
+                page -= 1;
+                if (page >= 1) needPrevClick = true;
                 continue;
             }
-            
+
             if (rows.length === 0) {
                 console.log(`❌ No users found on page ${page}, skipping...`);
+                page -= 1;
+                if (page >= 1) needPrevClick = true;
                 continue;
             }
             console.log(`👥 Found ${rows.length} users on page ${page}`);
             console.log(`🔄 Processing users from bottom to top (reverse order)...`);
 
+            let rowLoopExitReason = 'complete';
             for (let i = rows.length - 1; i >= 0; i--) {
                 try {
                     await waitWhilePaused();
@@ -1238,6 +1305,17 @@ async function scrapeRolimonsItem(itemId) {
                         totalLogged++;
                     }
 
+                    if (scrapeStartPageOverride != null) {
+                        const desired = Math.max(1, Math.min(scrapeStartPageOverride, totalPages));
+                        if (desired !== page) {
+                            console.log(
+                                `📄 !page override changed (target ${desired} ≠ current ${page}) — stopping row loop to re-sync`
+                            );
+                            rowLoopExitReason = 'override';
+                            break;
+                        }
+                    }
+
                 } catch (error) {
                     console.error(`❌ Error processing row ${i} (from bottom):`, error.message);
                     // Add retry logic for critical errors
@@ -1267,6 +1345,16 @@ async function scrapeRolimonsItem(itemId) {
                 }
             }
             console.log(`✅ Finished page ${page}/${totalPages}`);
+
+            if (rowLoopExitReason === 'override') {
+                needPrevClick = false;
+                continue;
+            }
+
+            page -= 1;
+            if (page >= 1) {
+                needPrevClick = true;
+            }
         }
         console.log(`✅ All users processed for item ${itemId}. Total valid hits so far: ${totalLogged}`);
         retryCount = 0;
