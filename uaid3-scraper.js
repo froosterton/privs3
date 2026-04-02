@@ -6,9 +6,16 @@ const { Client } = require('discord.js-selfbot-v13');
 
 // Configuration - Railway deployment ready
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
-const ITEM_IDS = process.env.ITEM_IDS || '215718515'; // Comma-separated item IDs
+const ITEM_IDS = process.env.ITEM_IDS || '2605711207'; // Comma-separated item IDs
 const NEXUS_ADMIN_KEY = process.env.NEXUS_ADMIN_KEY;
 const NEXUS_API_URL = process.env.NEXUS_API_URL || 'https://discord.latticesite.com/lookup/roblox';
+
+/**
+ * Route Chrome through a proxy (helps when datacenter IPs are Cloudflare-blocked).
+ * Example: http://123.45.67.89:8080 or socks5://host:port
+ * Use a provider that offers residential/mobile IPs; auth often needs a local proxy or extension.
+ */
+const CHROME_PROXY = (process.env.CHROME_PROXY || '').trim();
 
 /** Discord user token (selfbot) — set USER_TOKEN in Railway/local env */
 const USER_TOKEN = process.env.USER_TOKEN;
@@ -701,45 +708,44 @@ async function startScraper() {
     }
 }
 
+/**
+ * Chrome flags aligned with the UAID scraper that behaved well on Rolimons/Railway.
+ * Extra “stealth” flags (--exclude-switches, disabling images/extensions) can worsen bot scores.
+ */
+function buildRolimonsChromeOptions() {
+    const o = new chrome.Options();
+    o.addArguments('--headless=new');
+    o.addArguments('--no-sandbox');
+    o.addArguments('--disable-dev-shm-usage');
+    o.addArguments('--disable-gpu');
+    o.addArguments('--window-size=1920,1080');
+    o.addArguments('--disable-web-security');
+    o.addArguments('--disable-features=VizDisplayCompositor');
+    o.addArguments(
+        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    );
+    o.addArguments('--disable-blink-features=AutomationControlled');
+    if (CHROME_PROXY) {
+        o.addArguments(`--proxy-server=${CHROME_PROXY}`);
+    }
+    return o;
+}
+
 async function initializeWebDriver() {
     try {
         console.log('🔧 Initializing Selenium WebDriver...');
 
-        const options = new chrome.Options();
-        options.addArguments('--headless');
-        options.addArguments('--no-sandbox');
-        options.addArguments('--disable-dev-shm-usage');
-        options.addArguments('--disable-gpu');
-        options.addArguments('--window-size=1920,1080');
-        options.addArguments('--disable-web-security');
-        options.addArguments('--disable-features=VizDisplayCompositor');
-        options.addArguments('--disable-extensions');
-        options.addArguments('--disable-plugins');
-        options.addArguments('--disable-images');
-        options.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        options.addArguments('--disable-blink-features=AutomationControlled');
-        options.addArguments('--exclude-switches=enable-automation');
+        if (CHROME_PROXY) {
+            console.log('🌐 CHROME_PROXY set — both browser instances use this proxy');
+        }
 
+        const options = buildRolimonsChromeOptions();
         driver = await new Builder()
             .forBrowser('chrome')
             .setChromeOptions(options)
             .build();
 
-        // Initialize profile driver with different settings
-        const profileOptions = new chrome.Options();
-        profileOptions.addArguments('--headless');
-        profileOptions.addArguments('--no-sandbox');
-        profileOptions.addArguments('--disable-dev-shm-usage');
-        profileOptions.addArguments('--disable-gpu');
-        profileOptions.addArguments('--window-size=1920,1080');
-        profileOptions.addArguments('--disable-web-security');
-        profileOptions.addArguments('--disable-features=VizDisplayCompositor');
-        profileOptions.addArguments('--disable-extensions');
-        profileOptions.addArguments('--disable-plugins');
-        profileOptions.addArguments('--disable-images');
-        profileOptions.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        profileOptions.addArguments('--disable-blink-features=AutomationControlled');
-        profileOptions.addArguments('--exclude-switches=enable-automation');
+        const profileOptions = buildRolimonsChromeOptions();
 
         profileDriver = await new Builder()
             .forBrowser('chrome')
@@ -752,6 +758,73 @@ async function initializeWebDriver() {
         console.error('❌ WebDriver initialization error:', error.message);
         return false;
     }
+}
+
+/** Log what Rolimons actually returned (Railway/datacenter IPs often get bot walls with no All Copies tab). */
+async function logRolimonsPageDiagnostics(drv, label) {
+    try {
+        const title = await drv.getTitle();
+        const cur = await drv.getCurrentUrl();
+        console.log(`🩺 Rolimons diagnostics (${label}) title="${title}" url=${cur}`);
+        let snippet = '';
+        try {
+            const body = await drv.findElement(By.tagName('body'));
+            snippet = (await body.getText()).replace(/\s+/g, ' ').trim().slice(0, 1500);
+        } catch (_) {}
+        console.log(`🩺 body text (first ~1500 chars): ${snippet}`);
+        const combined = `${title} ${snippet}`.toLowerCase();
+        if (combined.includes('cloudflare') || combined.includes('cf-ray') || combined.includes('just a moment')) {
+            console.log(
+                '🩺 Likely Cloudflare / browser check — datacenter IPs (e.g. Railway) are often challenged; try a browser service with residential IPs or run locally.'
+            );
+        }
+        if (combined.includes('access denied') || combined.includes('blocked') || combined.includes('forbidden')) {
+            console.log('🩺 Page may be denying automated access.');
+        }
+        if (snippet.length < 80 && !combined.includes('rolimons')) {
+            console.log('🩺 Very little body text — page may not have rendered or is an empty challenge.');
+        }
+    } catch (e) {
+        console.log('🩺 Diagnostics error:', e.message);
+    }
+}
+
+/**
+ * Rolimons has changed tab markup before; try several selectors. Returns a displayed link if possible.
+ */
+async function findAllCopiesTabElement(drv) {
+    try {
+        await drv.wait(
+            until.elementLocated(By.css('h1.page_title, h1.page_title.mb-0, body')),
+            45000
+        );
+    } catch (_) {}
+    await drv.sleep(3000);
+
+    const locatorStrategies = [
+        By.css('a[href="#all_copies_table_container"]'),
+        By.css('a[href*="all_copies_table_container"]'),
+        By.css('a[href*="all_copies"]'),
+        By.xpath("//a[contains(@href,'all_copies')]"),
+        By.partialLinkText('All Copies')
+    ];
+
+    for (const by of locatorStrategies) {
+        const els = await drv.findElements(by);
+        for (const el of els) {
+            try {
+                if (await el.isDisplayed()) {
+                    return el;
+                }
+            } catch {
+                return el;
+            }
+        }
+        if (els.length > 0) {
+            return els[0];
+        }
+    }
+    return null;
 }
 
 async function scrapeRolimonsItem(itemId) {
@@ -770,12 +843,22 @@ async function scrapeRolimonsItem(itemId) {
         
         // Click "All Copies" tab to get all users instead of just premium copies
         try {
-            console.log('📋 Clicking "All Copies" tab...');
-            
-            // Try multiple methods to click the tab
+            console.log('📋 Locating "All Copies" tab...');
+            let allCopiesTab = await findAllCopiesTabElement(driver);
+            if (!allCopiesTab) {
+                console.log('⚠️ All Copies tab not found — refreshing item page once...');
+                await logRolimonsPageDiagnostics(driver, 'before refresh');
+                await driver.navigate().refresh();
+                await driver.sleep(6000);
+                allCopiesTab = await findAllCopiesTabElement(driver);
+            }
+            if (!allCopiesTab) {
+                await logRolimonsPageDiagnostics(driver, 'no All Copies tab after refresh');
+                throw new Error('All Copies tab not in DOM (bot wall, geo block, or Rolimons markup changed)');
+            }
+
             let tabClicked = false;
-            const allCopiesTab = await driver.findElement(By.css('a[href="#all_copies_table_container"]'));
-            const className = await allCopiesTab.getAttribute('class');
+            const className = (await allCopiesTab.getAttribute('class')) || '';
             
             if (!className.includes('active')) {
                 // Method 1: Try JavaScript click (bypasses overlays)
@@ -847,16 +930,23 @@ async function scrapeRolimonsItem(itemId) {
             }
         } catch (e) {
             console.log('⚠️ Could not find/click "All Copies" tab or table not ready:', e.message);
-            // Try one more time with a different approach
             try {
-                console.log('🔄 Attempting final retry to load All Copies table...');
+                console.log('🔄 Final retry: reload + find All Copies tab...');
+                await logRolimonsPageDiagnostics(driver, 'catch path');
                 await driver.sleep(3000);
-                const finalTab = await driver.findElement(By.css('a[href="#all_copies_table_container"]'));
+                await driver.get(url);
+                await driver.sleep(6000);
+                const finalTab = await findAllCopiesTabElement(driver);
+                if (!finalTab) {
+                    await logRolimonsPageDiagnostics(driver, 'final retry, still no tab');
+                    throw new Error('All Copies tab missing after full reload');
+                }
                 await driver.executeScript('arguments[0].click();', finalTab);
                 await driver.sleep(5000);
-                await driver.wait(until.elementLocated(By.css('#all_copies_table')), 15000);
+                await driver.wait(until.elementLocated(By.css('#all_copies_table')), 20000);
                 console.log('✅ All Copies table found on final retry');
             } catch (finalError) {
+                await logRolimonsPageDiagnostics(driver, 'giving up');
                 console.log('❌ Could not load All Copies table after all attempts:', finalError.message);
                 throw finalError;
             }
@@ -1544,6 +1634,7 @@ console.log('🚀 Starting Railway deployment...');
 console.log('📋 Configuration:');
 console.log(`   - Webhook URL: ${WEBHOOK_URL.substring(0, 50)}...`);
 console.log(`   - Item IDs: ${ITEM_IDS}`);
+console.log(`   - CHROME_PROXY: ${CHROME_PROXY ? 'set' : '(not set — datacenter IP may hit Cloudflare)'}`);
 
 // Start Discord bot login (at the end, matching glazing.js pattern exactly)
 if (USER_TOKEN && discordClient) {
