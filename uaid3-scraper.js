@@ -18,13 +18,17 @@ const NEXUS_API_URL = process.env.NEXUS_API_URL || 'https://discord.latticesite.
 const CHROME_PROXY = (process.env.CHROME_PROXY || '').trim();
 
 /**
- * Wait after each All Copies "Prev" while paginating (ms). Default 5000 keeps DataTables stable and reduces
- * Rolimons UAID rate limits; lower (e.g. 2000) speeds long jumps but can cause stale rows or throttles.
+ * Wait after each All Copies "Prev" (paginating the table only — no profile/UAID opens). Default is short;
+ * UAID throttling on Rolimons is mainly from loading owner rows too fast, not from DataTables Prev alone.
+ * Set ROLIMONS_PREV_DELAY_MS=0 for minimum delay; raise it if rows look stale or you hit rate-limit pages.
  */
-const ROLIMONS_PREV_DELAY_MS = Math.max(
-    300,
-    Number.parseInt(String(process.env.ROLIMONS_PREV_DELAY_MS || '5000'), 10) || 5000
-);
+function parsePrevDelayMs() {
+    const raw = process.env.ROLIMONS_PREV_DELAY_MS;
+    if (raw === undefined || raw === '') return 250;
+    const n = Number.parseInt(String(raw), 10);
+    return Number.isFinite(n) ? Math.max(0, n) : 250;
+}
+const ROLIMONS_PREV_DELAY_MS = parsePrevDelayMs();
 
 /** `HEADLESS=0` or `CHROME_HEADLESS=0` opens real Chrome windows (local Cloudflare checks). Default: headless. */
 function useHeadlessChrome() {
