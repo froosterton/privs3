@@ -6,7 +6,6 @@ const { Client } = require('discord.js-selfbot-v13');
 
 // Configuration - Railway deployment ready
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
-const USERNAME_WEBHOOK_URL = process.env.USERNAME_WEBHOOK_URL;
 const ITEM_IDS = process.env.ITEM_IDS || '215718515'; // Comma-separated item IDs
 const NEXUS_ADMIN_KEY = process.env.NEXUS_ADMIN_KEY;
 const NEXUS_API_URL = process.env.NEXUS_API_URL || 'https://discord.latticesite.com/lookup/roblox';
@@ -1396,7 +1395,6 @@ async function lookupDiscordAndSend(robloxUsername, rolimonsData) {
         }
 
         await sendToWebhook(robloxUsername, discordValue, discordRecord, rolimonsData);
-        await sendUsernameOnlyToWebhook(discordValue);
         historicalRobloxFromEmbeds.add(normalizeDedupKey(robloxUsername));
         historicalDiscordFromEmbeds.add(normalizeDedupKey(discordValue));
         return true;
@@ -1499,24 +1497,6 @@ async function sendToWebhook(robloxUsername, discordUsername, discordRecord, rol
     }
 }
 
-async function sendUsernameOnlyToWebhook(discordUsername) {
-    console.log(`📤 Sending Discord username only to username webhook: ${discordUsername}`);
-    try {
-        const payload = {
-            content: discordUsername
-        };
-        
-        const response = await axios.post(USERNAME_WEBHOOK_URL, payload);
-        console.log('✅ Username-only webhook sent successfully, status:', response.status);
-    } catch (e) {
-        console.error('❌ Username-only webhook POST error:', e.message);
-        if (e.response) {
-            console.error('Response status:', e.response.status);
-            console.error('Response data:', e.response.data);
-        }
-    }
-}
-
 async function cleanup() {
     console.log('🧹 Cleaning up resources...');
     
@@ -1554,10 +1534,6 @@ if (!WEBHOOK_URL) {
     console.error('❌ WEBHOOK_URL environment variable is required');
     process.exit(1);
 }
-if (!USERNAME_WEBHOOK_URL) {
-    console.error('❌ USERNAME_WEBHOOK_URL environment variable is required');
-    process.exit(1);
-}
 if (!NEXUS_ADMIN_KEY) {
     console.error('❌ NEXUS_ADMIN_KEY environment variable is required');
     process.exit(1);
@@ -1567,7 +1543,6 @@ if (!NEXUS_ADMIN_KEY) {
 console.log('🚀 Starting Railway deployment...');
 console.log('📋 Configuration:');
 console.log(`   - Webhook URL: ${WEBHOOK_URL.substring(0, 50)}...`);
-console.log(`   - Username Webhook URL: ${USERNAME_WEBHOOK_URL.substring(0, 50)}...`);
 console.log(`   - Item IDs: ${ITEM_IDS}`);
 
 // Start Discord bot login (at the end, matching glazing.js pattern exactly)
