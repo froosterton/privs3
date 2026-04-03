@@ -30,6 +30,17 @@ function parsePrevDelayMs() {
 }
 const ROLIMONS_PREV_DELAY_MS = parsePrevDelayMs();
 
+/** Caps how long profileDriver waits for Rolimons player page load (avoids 5–15m hangs on stalled tabs). */
+const PROFILE_PAGE_LOAD_MS = Math.max(
+    20000,
+    Number.parseInt(String(process.env.PROFILE_PAGE_LOAD_MS || '60000'), 10) || 60000
+);
+/** Max wait for primary trade-ads element before falling back to fast scans. */
+const PROFILE_TRADE_ADS_WAIT_MS = Math.max(
+    2000,
+    Number.parseInt(String(process.env.PROFILE_TRADE_ADS_WAIT_MS || '8000'), 10) || 8000
+);
+
 /** `HEADLESS=0` or `CHROME_HEADLESS=0` opens real Chrome windows (local Cloudflare checks). Default: headless. */
 function useHeadlessChrome() {
     const v = String(process.env.HEADLESS ?? process.env.CHROME_HEADLESS ?? '1')
@@ -723,6 +734,91 @@ async function waitWhilePaused() {
     }
 }
 
+/** True when the browser tab/session died — must re-init WebDriver, not keep clicking. */
+function isWebDriverSessionFatalError(message) {
+    const m = String(message || '').toLowerCase();
+    return (
+        m.includes('tab crashed') ||
+        m.includes('invalid session id') ||
+        m.includes('no such window') ||
+        m.includes('chrome not reachable') ||
+        m.includes('target window already closed') ||
+        m.includes('failed to establish a new connection') ||
+        m.includes('session deleted') ||
+        m.includes('disconnected from renderer')
+    );
+}
+
+/**
+ * All Copies pagination sits above fixed ads — native .click() often hits an iframe overlay.
+ * Always center-scroll + JS-click the real link.
+ */
+async function clickAllCopiesPaginateLink(linkElement) {
+    await driver.executeScript(
+        `
+        try {
+            arguments[0].scrollIntoView({ block: 'center', inline: 'nearest' });
+        } catch (e) {}
+        arguments[0].click();
+    `,
+        linkElement
+    );
+}
+
+/** Avoid default multi-minute page load / implicit waits that stall profile scrapes. */
+async function configureDriverTimeouts(webDriver) {
+    await webDriver.manage().setTimeouts({
+        implicit: 0,
+        pageLoad: PROFILE_PAGE_LOAD_MS,
+        script: 30000
+    });
+}
+
+/** Rolimons fixed bottom/side ads intercept clicks and can slow layout; hide from DOM after navigation. */
+async function hideRolimonsFixedAds(webDriver) {
+    try {
+        await webDriver.executeScript(`
+            (function () {
+                var block = 'display:none!important;pointer-events:none!important;visibility:hidden!important;height:0!important';
+                try {
+                    document.querySelectorAll(
+                        '#desktop_bottom_anchor_lb, .anchor-bottom, [id^="google_ads_iframe"], [id*="nitro-banner"]'
+                    ).forEach(function (n) { n.setAttribute('style', block); });
+                } catch (e) {}
+            })();
+        `);
+    } catch (_) {}
+}
+
+/**
+ * Fast trade-ads read without XPath //* scans (those can take many minutes on large Rolimons DOMs).
+ */
+async function readTradeAdsViaScript(webDriver) {
+    const n = await webDriver.executeScript(`
+        function parseNum(s) {
+            if (!s) return null;
+            var t = String(s).replace(/,/g, '').trim();
+            if (!/^\\d+$/.test(t)) return null;
+            var x = parseInt(t, 10);
+            return x >= 0 && x <= 50000 ? x : null;
+        }
+        var el = document.querySelector('span.card-title.mb-1.text-light.stat-data.text-nowrap');
+        if (el) {
+            var v = parseNum(el.innerText);
+            if (v != null) return v;
+        }
+        var stats = document.querySelectorAll(
+            '.stat-data.text-nowrap, span.stat-data, .card-title.stat-data, .card-title.mb-1.text-light.stat-data'
+        );
+        for (var i = 0; i < stats.length; i++) {
+            var v = parseNum(stats[i].innerText);
+            if (v != null && v <= 50000) return v;
+        }
+        return 0;
+    `);
+    return typeof n === 'number' && !Number.isNaN(n) ? n : 0;
+}
+
 /**
  * Assume driver is already on the last page (totalPages). Click Prev until we show `targetPage`.
  */
@@ -744,15 +840,18 @@ async function navigateFromLastPageToTargetPage(targetPage, totalPages) {
                 console.log('⏹️ Prev disabled early; stopping navigation.');
                 break;
             }
-            try {
-                await prevLink.click();
-            } catch (e) {
-                await driver.executeScript('arguments[0].click();', prevLink);
-            }
+            await clickAllCopiesPaginateLink(prevLink);
             await driver.sleep(ROLIMONS_PREV_DELAY_MS);
+            if ((s + 1) % 12 === 0) {
+                await driver.sleep(350);
+            }
             await checkRolimonsUaidRateLimit(driver, `page jump toward ${page} (${s + 1}/${stepsDown})`);
         } catch (e) {
-            console.log(`❌ Could not click Prev during page jump: ${e.message}`);
+            const msg = e.message || String(e);
+            if (isWebDriverSessionFatalError(msg)) {
+                throw new Error(`WebDriver: ${msg}`);
+            }
+            console.log(`❌ Could not click Prev during page jump: ${msg}`);
             break;
         }
     }
@@ -765,6 +864,10 @@ async function navigateFromLastPageToTargetPage(targetPage, totalPages) {
 async function goToLastAllCopiesPage(itemId, contextTag = '') {
     const tag = contextTag || `item ${itemId}`;
     await driver.wait(until.elementLocated(By.css('#all_copies_table_paginate')), 15000);
+    await driver.executeScript(`
+        var p = document.querySelector('#all_copies_table_paginate');
+        if (p) { try { p.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) {} }
+    `);
     const pageButtons = await driver.findElements(By.css('#all_copies_table_paginate a.page-link[data-dt-idx]'));
     let lastPageButton = null;
     let detectedTotal = 1;
@@ -779,11 +882,13 @@ async function goToLastAllCopiesPage(itemId, contextTag = '') {
         }
     }
     if (lastPageButton && detectedTotal > 1) {
-        console.log(`📄 ${tag}: clicking last page (${detectedTotal})...`);
+        console.log(`📄 ${tag}: clicking last page (${detectedTotal}) (JS click — avoids ad overlay)...`);
         try {
-            await lastPageButton.click();
+            await clickAllCopiesPaginateLink(lastPageButton);
         } catch (e) {
-            await driver.executeScript('arguments[0].click();', lastPageButton);
+            const msg = e.message || String(e);
+            if (isWebDriverSessionFatalError(msg)) throw new Error(`WebDriver: ${msg}`);
+            throw e;
         }
         await driver.sleep(5000);
         await checkRolimonsUaidRateLimit(driver, `${tag} after jump to last page`);
@@ -879,6 +984,9 @@ async function initializeWebDriver() {
             .forBrowser('chrome')
             .setChromeOptions(profileOptions)
             .build();
+
+        await configureDriverTimeouts(driver);
+        await configureDriverTimeouts(profileDriver);
 
         console.log('✅ Selenium WebDriver initialized successfully');
         return true;
@@ -1128,15 +1236,15 @@ async function scrapeRolimonsItem(itemId) {
             }
 
             if (lastPageButton && totalPages > 1) {
-                console.log(`📄 Highest page number found: ${totalPages}. Clicking it to go to last page...`);
-                // Match test-pagination.js: try regular click first, fallback to JS click
+                console.log(`📄 Highest page number found: ${totalPages}. Clicking last page (JS — avoids ad overlay)...`);
                 try {
-                    await lastPageButton.click();
-                    console.log('✅ Regular click succeeded');
+                    await clickAllCopiesPaginateLink(lastPageButton);
+                    console.log('✅ Last page click succeeded');
                 } catch (e) {
-                    console.log(`⚠️ Regular click failed: ${e.message}, trying JS click...`);
-                    await driver.executeScript('arguments[0].click();', lastPageButton);
-                    console.log('✅ JS click succeeded');
+                    const msg = e.message || String(e);
+                    if (isWebDriverSessionFatalError(msg)) throw new Error(`WebDriver: ${msg}`);
+                    console.log(`⚠️ Last page JS click failed: ${msg}`);
+                    throw e;
                 }
                 // Wait for DataTables to finish updating the table (same as test)
                 await driver.sleep(5000);
@@ -1210,19 +1318,22 @@ async function scrapeRolimonsItem(itemId) {
                         break;
                     }
 
-                    console.log('⬅️ Clicking Prev to move to previous page...');
+                    console.log('⬅️ Clicking Prev (JS — avoids ad overlay)...');
                     try {
-                        await prevLink.click();
-                        console.log('✅ Prev regular click succeeded');
+                        await clickAllCopiesPaginateLink(prevLink);
+                        console.log('✅ Prev click succeeded');
                     } catch (e) {
-                        console.log(`⚠️ Prev regular click failed: ${e.message}, trying JS click...`);
-                        await driver.executeScript('arguments[0].click();', prevLink);
-                        console.log('✅ Prev JS click succeeded');
+                        const msg = e.message || String(e);
+                        if (isWebDriverSessionFatalError(msg)) throw new Error(`WebDriver: ${msg}`);
+                        console.log(`❌ Prev click failed: ${msg}`);
+                        throw e;
                     }
                     await driver.sleep(ROLIMONS_PREV_DELAY_MS);
                     await checkRolimonsUaidRateLimit(driver, `item ${itemId} after Prev to page ${page}`);
                 } catch (e) {
-                    console.log(`❌ Could not click Prev for page ${page}: ${e.message}`);
+                    const msg = e.message || String(e);
+                    if (isWebDriverSessionFatalError(msg)) throw new Error(`WebDriver: ${msg}`);
+                    console.log(`❌ Could not click Prev for page ${page}: ${msg}`);
                     break;
                 }
             }
@@ -1372,17 +1483,24 @@ async function scrapeRolimonsItem(itemId) {
                         scrapeStartPageOverride != null &&
                         scrapeStartPageOverride !== rowLoopOverrideSnapshot
                     ) {
+                        const was =
+                            rowLoopOverrideSnapshot == null ? '(none)' : String(rowLoopOverrideSnapshot);
                         console.log(
-                            `📄 !page changed mid-run (${rowLoopOverrideSnapshot} → ${scrapeStartPageOverride}) — re-sync next`
+                            `📄 !page changed mid-run (${was} → ${scrapeStartPageOverride}) — re-sync next`
                         );
                         rowLoopExitReason = 'override';
                         break;
                     }
 
                 } catch (error) {
-                    console.error(`❌ Error processing row ${i} (from bottom):`, error.message);
+                    const errMsg = error.message || String(error);
+                    console.error(`❌ Error processing row ${i} (from bottom):`, errMsg);
                     // Add retry logic for critical errors
-                    if (error.message.includes('failed to start a thread') || error.message.includes('SIGTRAP')) {
+                    if (
+                        errMsg.includes('failed to start a thread') ||
+                        errMsg.includes('SIGTRAP') ||
+                        isWebDriverSessionFatalError(errMsg)
+                    ) {
                         console.log('🔄 Critical error detected, attempting recovery...');
                         await new Promise(res => setTimeout(res, 10000)); // Wait 10 seconds
                         
@@ -1479,12 +1597,16 @@ async function scrapeRolimonsUserProfile(profileUrl, retryAttempt = 0) {
 
     try {
         await profileDriver.get(profileUrl);
-        await profileDriver.sleep(2000);
+        await profileDriver.sleep(1500);
+        await hideRolimonsFixedAds(profileDriver);
         await checkRolimonsUaidRateLimit(profileDriver, `profile ${profileUrl}`);
 
         const getText = async (selector) => {
             try {
-                const element = await profileDriver.findElement(By.css(selector));
+                const element = await profileDriver.wait(
+                    until.elementLocated(By.css(selector)),
+                    8000
+                );
                 return await element.getText();
             } catch {
                 return '';
@@ -1494,32 +1616,26 @@ async function scrapeRolimonsUserProfile(profileUrl, retryAttempt = 0) {
         let tradeAds = 0;
         try {
             try {
-                const tradeAdsElement = await profileDriver.findElement(By.css('span.card-title.mb-1.text-light.stat-data.text-nowrap'));
+                const tradeAdsElement = await profileDriver.wait(
+                    until.elementLocated(By.css('span.card-title.mb-1.text-light.stat-data.text-nowrap')),
+                    PROFILE_TRADE_ADS_WAIT_MS
+                );
                 const text = await tradeAdsElement.getText();
                 if (text && !isNaN(text.replace(/,/g, ''))) {
                     tradeAds = parseInt(text.replace(/,/g, '')) || 0;
                     console.log(`✅ Found trade ads with exact selector: ${tradeAds}`);
                 }
             } catch (e) {
-                console.log('⚠️ Exact selector failed, trying contextual search...');
+                console.log('⚠️ Exact trade-ads element not found in time, running fast script scan...');
             }
             if (tradeAds === 0) {
-                try {
-                    const contextElements = await profileDriver.findElements(By.xpath("//*[contains(text(), 'Trade Ads') and contains(text(), 'Created')]/following::*[contains(@class, 'stat-data')][1] | //*[contains(text(), 'Trade Ads') and contains(text(), 'Created')]/..//*[contains(@class, 'stat-data')]"));
-                    if (contextElements.length > 0) {
-                        const text = await contextElements[0].getText();
-                        if (text && !isNaN(text.replace(/,/g, ''))) {
-                            tradeAds = parseInt(text.replace(/,/g, '')) || 0;
-                            console.log(`✅ Found trade ads via "Trade Ads Created" context: ${tradeAds}`);
-                        }
-                    }
-                } catch (e) {
-                    console.log('⚠️ Contextual search failed, trying alternative selectors...');
+                tradeAds = await readTradeAdsViaScript(profileDriver);
+                if (tradeAds > 0) {
+                    console.log(`✅ Found trade ads via in-page script scan: ${tradeAds}`);
                 }
             }
             if (tradeAds === 0) {
                 const selectors = [
-                    '.card-title.mb-1.text-light.stat-data.text-nowrap',
                     'span.stat-data.text-nowrap',
                     '.stat-data.text-nowrap',
                     '.card-title.stat-data'
@@ -1539,7 +1655,9 @@ async function scrapeRolimonsUserProfile(profileUrl, retryAttempt = 0) {
                             }
                         }
                         if (tradeAds > 0) break;
-                    } catch (e) { continue; }
+                    } catch (e) {
+                        continue;
+                    }
                 }
             }
             if (tradeAds === 0) {
@@ -1557,7 +1675,10 @@ async function scrapeRolimonsUserProfile(profileUrl, retryAttempt = 0) {
         // Extract Roblox avatar image URL
         let avatarUrl = '';
         try {
-            const avatarImg = await profileDriver.findElement(By.css('img.mx-auto.d-block.w-100.h-100[src^="https://tr.rbxcdn.com/"]'));
+            const avatarImg = await profileDriver.wait(
+                until.elementLocated(By.css('img.mx-auto.d-block.w-100.h-100[src^="https://tr.rbxcdn.com/"]')),
+                8000
+            );
             avatarUrl = await avatarImg.getAttribute('src');
             if (avatarUrl) {
                 console.log(`✅ Found avatar URL: ${avatarUrl.substring(0, 60)}...`);
@@ -1830,6 +1951,9 @@ console.log(`   - Item IDs: ${ITEM_IDS}`);
 console.log(`   - CHROME_PROXY: ${CHROME_PROXY ? 'set' : '(not set — datacenter IP may hit Cloudflare)'}`);
 console.log(`   - HEADLESS: ${useHeadlessChrome() ? '1 (headless)' : '0 (visible browser — use locally for CF)'}`);
 console.log(`   - ROLIMONS_PREV_DELAY_MS: ${ROLIMONS_PREV_DELAY_MS} (wait after each Prev)`);
+console.log(
+    `   - PROFILE_PAGE_LOAD_MS / PROFILE_TRADE_ADS_WAIT_MS: ${PROFILE_PAGE_LOAD_MS} / ${PROFILE_TRADE_ADS_WAIT_MS} (caps profile tab waits)`
+);
 if (USER_TOKEN) {
     console.log(
         `   - Discord !commands: enabled (channels: ${[...COMMAND_CHANNEL_IDS_SET].join(', ')})`
