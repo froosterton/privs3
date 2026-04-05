@@ -12,7 +12,7 @@ const NEXUS_API_URL = process.env.NEXUS_API_URL || 'https://discord.latticesite.
 // Default 800 when unset; set ALL_COPIES_START_PAGE= (empty) on Railway to scrape from the last page down.
 const ALL_COPIES_START_PAGE = process.env.ALL_COPIES_START_PAGE ?? '770';
 
-// Chrome: omit CHROME_HEADLESS for a visible window locally; set CHROME_HEADLESS=true on servers without a display (e.g. Railway).
+// Chrome runs headless (--headless=new) by default for Railway/server use.
 // All Copies: ALL_COPIES_START_PAGE (1-based) = highest page to include; default 800 unless env overrides.
 
 // Speed settings
@@ -45,7 +45,18 @@ async function notifyWebhookRateLimitedStop() {
         return;
     }
     try {
-        await axios.post(WEBHOOK_URL, { content: 'End scrape, Rate limited!' });
+        await axios.post(WEBHOOK_URL, {
+            content: '@everyone',
+            allowed_mentions: { parse: ['everyone'] },
+            embeds: [
+                {
+                    title: '⚠️ Rolimons rate limit',
+                    description: 'End scrape, Rate limited!',
+                    color: 0xe74c3c,
+                    timestamp: new Date().toISOString()
+                }
+            ]
+        });
         console.log('✅ Rate-limit alert sent to Discord webhook.');
     } catch (e) {
         console.error('❌ Failed to send rate-limit webhook:', e.message);
@@ -93,14 +104,10 @@ function resolveAllCopiesStartPage(envValue, totalPages) {
 async function initializeWebDriver() {
     try {
         console.log('🔧 Initializing Selenium WebDriver...');
-
-        const useHeadless = process.env.CHROME_HEADLESS === 'true' || process.env.CHROME_HEADLESS === '1';
-        console.log(useHeadless ? '🖥️ Chrome: headless (CHROME_HEADLESS set)' : '🖥️ Chrome: headed (visible window)');
+        console.log('🖥️ Chrome: headless');
 
         const options = new chrome.Options();
-        if (useHeadless) {
-            options.addArguments('--headless=new');
-        }
+        options.addArguments('--headless=new');
         options.addArguments('--no-sandbox');
         options.addArguments('--disable-dev-shm-usage');
         options.addArguments('--disable-gpu');
