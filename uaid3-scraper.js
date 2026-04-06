@@ -10,7 +10,7 @@ const ITEM_IDS = process.env.ITEM_IDS || '215718515';
 const NEXUS_ADMIN_KEY = process.env.NEXUS_ADMIN_KEY;
 const NEXUS_API_URL = process.env.NEXUS_API_URL || 'https://discord.latticesite.com/lookup/roblox';
 // Default 800 when unset; set ALL_COPIES_START_PAGE= (empty) on Railway to scrape from the last page down.
-const ALL_COPIES_START_PAGE = process.env.ALL_COPIES_START_PAGE ?? '110';
+const ALL_COPIES_START_PAGE = process.env.ALL_COPIES_START_PAGE ?? '70';
 
 // Chrome runs headless (--headless=new) by default for Railway/server use.
 // All Copies: ALL_COPIES_START_PAGE (1-based) = highest page to include; default 800 unless env overrides.
