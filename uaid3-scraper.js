@@ -6,11 +6,11 @@ const express = require('express');
 // Configuration — set WEBHOOK_URL, USERNAME_WEBHOOK_URL, and NEXUS_ADMIN_KEY in the environment (e.g. Railway).
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const USERNAME_WEBHOOK_URL = process.env.USERNAME_WEBHOOK_URL;
-const ITEM_IDS = process.env.ITEM_IDS || '33070696';
+const ITEM_IDS = process.env.ITEM_IDS || '74891470';
 const NEXUS_ADMIN_KEY = process.env.NEXUS_ADMIN_KEY;
 const NEXUS_API_URL = process.env.NEXUS_API_URL || 'https://discord.latticesite.com/lookup/roblox';
 // Default 800 when unset; set ALL_COPIES_START_PAGE= (empty) on Railway to scrape from the last page down.
-const ALL_COPIES_START_PAGE = process.env.ALL_COPIES_START_PAGE ?? '57';
+const ALL_COPIES_START_PAGE = process.env.ALL_COPIES_START_PAGE ?? '80';
 
 // Chrome runs headless (--headless=new) by default for Railway/server use.
 // All Copies: ALL_COPIES_START_PAGE (1-based) = highest page to include; default 800 unless env overrides.
